@@ -1,0 +1,86 @@
+import csv
+import re
+import sys
+import tempfile
+from pathlib import Path
+import requests
+from bs4 import BeautifulSoup
+from pdfminer.high_level import extract_text
+
+LINK_FILE = Path("links4_fixed.csv")
+OUT_DIR = Path("output")
+OUT_DIR.mkdir(exist_ok=True)
+QUOTE_FILE = OUT_DIR / "max_quotes3.csv"
+
+TARGET_WORDS = re.compile(r"\bMAX(?:\s*-?\s*(?:7|8|9|10))?\b", re.I)
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+def fetch_url(url):
+    r = requests.get(url, headers={"User-Agent": "SentimentScraper/1.0 (+https://example.edu)"}, timeout=40)
+    r.raise_for_status()
+    return r.content
+
+def extract_from_html(content):
+    soup = BeautifulSoup(content, "lxml")
+    for tag in soup(["script", "style", "header", "footer", "nav"]):
+        tag.extract()
+    return soup.get_text(" ")
+
+def extract_from_pdf(content):
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+        tmp.write(content)
+        tmp.flush()
+        return extract_text(tmp.name)
+
+def sentences_with_targets(text):
+    for s in SENTENCE_SPLIT.split(text):
+        if TARGET_WORDS.search(s):
+            yield re.sub(r"\s+", " ", s).strip()
+
+def parse_doc(url, content):
+    if url.lower().endswith(".pdf") or b"%PDF" in content[:1024]:
+        raw = extract_from_pdf(content)
+    else:
+        raw = extract_from_html(content)
+    return list(sentences_with_targets(raw))
+
+def open_csv_with_fallback(path):
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return open(path, newline="", encoding=enc)
+        except UnicodeDecodeError:
+            pass
+    return open(path, newline="", encoding="utf-8", errors="replace")
+
+def main():
+    if not LINK_FILE.exists():
+        sys.exit(f"{LINK_FILE} not found")
+
+    ok = 0
+    fail = 0
+
+    with open(QUOTE_FILE, "w", newline="", encoding="utf-8") as fout, open_csv_with_fallback(LINK_FILE) as fin:
+        writer = csv.writer(fout)
+        writer.writerow(["airline", "period", "name", "url", "sentence"])
+        for row in csv.DictReader(fin):
+            airline = row.get("airline", "").strip()
+            period = row.get("period", "").strip()
+            name = row.get("name", "").strip()
+            url = row["url"].strip()
+            try:
+                quotes = parse_doc(url, fetch_url(url))
+                for q in quotes[:10]:
+                    writer.writerow([airline, period, name, url, q])
+                ok += 1
+                print(f"✓ {url}  ({len(quotes)} quotes)")
+            except Exception as e:
+                fail += 1
+                print(f"{url} -> {e}")
+
+    print("-" * 50)
+    print(f"Done. Success: {ok}   Failed: {fail}")
+    print(f"Quotes saved to {QUOTE_FILE.resolve()}")
+
+if __name__ == "__main__":
+    main()
+
